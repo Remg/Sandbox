@@ -6,6 +6,7 @@ namespace Remg\GeneratorBundle\Generator\Entity;
 use Doctrine\Common\Inflector\Inflector;
 use Doctrine\DBAL\Types\Type;
 
+use Remg\GeneratorBundle\Model\AssociationInterface;
 use Remg\GeneratorBundle\Model\EntityInterface;
 use Remg\GeneratorBundle\Model\FieldInterface;
 use Remg\GeneratorBundle\Model\PrimaryKeyInterface;
@@ -27,9 +28,8 @@ class EntityGenerator
 
     private $inflector;
 
-
     /**
-     * Hash-map for handle types.
+     * Hash-map for type aliases.
      *
      * @var array
      */
@@ -56,138 +56,6 @@ class EntityGenerator
         'number',
         'email',
     ];
-
-    private function humanize($string)
-    {
-        return strtolower(preg_replace('~(?<=\\w)([A-Z])~', ' $1', $string));
-    }
-
-    private function generateConstructorBody(EntityInterface $entity)
-    {
-        $lines = [];
-
-        foreach ($entity->getAssociations() as $association) {
-            if (in_array($association->getType(), ['OneToMany', 'ManyToMany'])) {
-                $lines [] = sprintf('$this->%s = new \Doctrine\Common\Collections\ArrayCollection();', $association->getName());
-            }
-        }
-
-        return implode(PHP_EOL, $lines);
-    }
-
-    private function getEntityToString(EntityInterface $entity)
-    {
-        foreach ($this->toStringProperties as $propertyName) {
-            if ($entity->hasField($propertyName)) {
-                return sprintf('$this->%s', $propertyName);
-            }
-        }
-
-        return sprintf("'%s #'. \$this->id", $entity->getShortName());
-    }
-
-    private function generateToStringBody(EntityInterface $entity)
-    {
-        return sprintf('return (string) %s;', $this->getEntityToString($entity));
-    }
-
-    /**
-     * @param string $type
-     *
-     * @return string
-     */
-    protected function getTypeAlias($type)
-    {
-        if (isset($this->typeAlias[$type])) {
-            return $this->typeAlias[$type];
-        }
-
-        return $type;
-    }
-
-    private function buildFieldParameter(FieldInterface $field)
-    {
-        $parameter = $this
-            ->buildParameter()
-            ->setName($field->getName())
-            ->setType($this->getTypeAlias($field->getType()));
-
-        if ($field->isNullable()) {
-            $parameter->setDefaultValue(null);
-        }
-
-        return $parameter;
-    }
-
-    private function generateFieldAnnotations(FieldInterface $field)
-    {
-        return implode(PHP_EOL, array_merge(
-            $this->generateValidationFieldAnnotations($field),
-            [null],
-            $this->generateDoctrineFieldAnnotations($field)
-        ));
-    }
-    private function generateDoctrineFieldAnnotations(FieldInterface $field)
-    {
-        $lines = [];
-
-        $column = [
-            'name'     => sprintf('"%s"', $field->getName()),
-            'type'     => sprintf('"%s"', $field->getType()),
-            'nullable' => var_export($field->isNullable(), true),
-            'unique'   => var_export($field->isUnique(), true),
-        ];
-
-        switch ($field->getType()) {
-            case Type::STRING:
-                $column['length'] = $field->getLength();
-                break;
-            case Type::DECIMAL:
-                $column['precision'] = $field->getPrecision();
-                $column['scale'] = $field->getScale();
-        }
-
-        // todo : implement Field::isUnsigned()
-        /*
-        if ($field->isUnsigned()) {
-            $column['options'] = '{"unsigned"=true}';
-        }
-        */
-        // todo : implement Field::getColumnDefinition()
-        /*
-        if (null !== $definition = $field->getColumnDefinition()) {
-            $column['columnDefinition'] = $definition;
-        }
-        */
-
-        $options = [];
-        foreach ($column as $option => $value) {
-            $options[] = sprintf('%s=%s', $option, $value);
-        }
-
-        $lines[] = sprintf('Column(%s)', implode(', ', $options));
-
-        if ($field instanceof PrimaryKeyInterface) {
-            $lines[] = 'Id';
-            $lines[] = 'GeneratedValue(strategy="AUTO")';
-        }
-
-        return array_map(function($line) {
-            return sprintf('@%s\%s', static::MAPPING_ALIAS, $line);
-        }, $lines);
-    }
-
-    private function generateValidationFieldAnnotations(FieldInterface $field)
-    {
-        $lines = [];
-
-        $lines[] = sprintf('@%s\Type(', static::CONSTRAINT_ALIAS);
-        $lines[] = sprintf('    type="%s",', $field->getType());
-        $lines[] = sprintf('    message="%s.%s.constraint.type', $field->getEntity()->getTranslationKey(), $field->getName());
-        $lines[] = ')';
-
-        return $lines;
-    }
 
     /**
      * @param EntityInterface $entity
@@ -321,114 +189,166 @@ class EntityGenerator
             }
 
             // Property
-            $property = $this->buildProperty($association->getName());
-
-            $docBlock = $this->buildDocBlock(sprintf('Contains the %s.', $readableAssociationName));
-            $docBlock->setTag($this->buildTag('var', $type));
-            $property->setDocBlock($docBlock);
+            $property = $this
+                ->buildProperty()
+                ->setName($association->getName())
+                ->setDocBlock($this
+                    ->buildDocBlock()
+                    ->setShortDescription(sprintf('Contains the %s.', $readableAssociationName))
+                    ->setLongDescription($this->generateAssociationAnnotations($association))
+                    ->setWordWrap(false)
+                    ->setTag($this->buildTag('var', $type))
+                );
 
             $class->addPropertyFromGenerator($property);
 
             // Getter
-            $method = $this->buildMethod(sprintf('get%s', ucfirst($association->getName())));
-            $method->setBody(sprintf('return $this->%s;', $association->getName()));
-            $method->setReturnType($type);
+            $method = $this
+                ->buildMethod()
+                ->setName(sprintf('get%s', ucfirst($association->getName())))
+                ->setBody(sprintf('return $this->%s;', $association->getName()))
+                ->setReturnType(sprintf(
+                    '%s%s',
+                    in_array($association->getType(), ['OneToOne', 'ManyToOne']) ? '?' : null,
+                    $type
+                ))
+                ->setDocBlock($this
+                    ->buildDocBlock()
+                    ->setShortDescription(sprintf('Gets the %s.', $readableAssociationName))
+                    ->setTag($this
+                        ->buildTagReturn()
+                        ->setTypes($type)
+                        ->setDescription(sprintf('The %s.', $readableAssociationName))
+                    )
+                );
 
-            $docBlock = $this->buildDocBlock(sprintf('Gets the %s.', $readableAssociationName));
-            $docBlock->setTag($this->buildTagReturn([$type], sprintf('The %s.', $readableAssociationName)));
-            $method->setDocBlock($docBlock);
+            // Nullable types are introduced in PHP 7.1.
+            // https://wiki.php.net/rfc/nullable_types
+            if (version_compare(PHP_VERSION, '7.1.0') < 0) {
+                $method->setReturnType(null);
+            }
 
             $class->addMethodFromGenerator($method);
 
+
             if (in_array($association->getType(), ['OneToMany', 'ManyToMany'])) {
                 $singular = $this->singularize($association->getName());
-                $readableSingular = strtolower(preg_replace('~(?<=\\w)([A-Z])~', ' $1', $association->getName()));
+                $readableSingular = $this->humanize($singular);
 
                 // Add
-                $body = '';
-                if ($association->isBidirectional() && !$association->isOwningSide()) {
-                    $methodName = 'OneToMany' === $association->getType()
-                        ? sprintf('set%s', ucfirst($this->singularize($association->getMappedBy())))
-                        : sprintf('add%s', ucfirst($this->singularize($association->getMappedBy())));
-
-                    $body .= sprintf('$%s->%s($this);', $singular, $methodName);
-                    $body .= "\n\n";
-                }
-
-                $body .= <<<EOL
-if (!\$this->{$association->getName()}->contains(\$$singular)) {
-    \$this->{$association->getName()}->add(\$$singular);
-}
-
-return \$this;
-EOL
-                ;
-
-                $method = $this->buildMethod(sprintf('add%s', ucfirst($singular)));
-                $method->setBody($body);
-                $method->setReturnType($entity->getName());
-
-                $docBlock = $this->buildDocBlock(sprintf('Adds a %s.', $singular));
-                $docBlock->setTag($this->buildTagParam($singular, $association->getTargetEntity(), sprintf('The %s.', $singular)));
-                $docBlock->setTag($this->buildTagReturn(['self']));
-                $method->setDocBlock($docBlock);
-
-
-                $parameter = $this->buildParameter($singular, $association->getTargetEntity());
-                $method->setParameter($parameter);
-
+                $method = $this
+                    ->buildMethod()
+                    ->setName(sprintf('add%s', ucfirst($singular)))
+                    ->setParameter($this
+                        ->buildParameter()
+                        ->setName($singular)
+                        ->setType($association->getTargetEntity())
+                    )
+                    ->setBody($this->generateAddBody($association))
+                    ->setReturnType($entity->getName())
+                    ->setDocBlock($this
+                        ->buildDocBlock()
+                        ->setShortDescription(sprintf('Adds a %s.', $singular))
+                        ->setTag($this
+                            ->buildTagParam()
+                            ->setVariableName($singular)
+                            ->setTypes($type)
+                            ->setDescription(sprintf('The %s.', $singular))
+                        )
+                        ->setTag($this
+                            ->buildTagReturn()
+                            ->setTypes('self')
+                        )
+                    );
 
                 $class->addMethodFromGenerator($method);
-
-
 
                 // Remove
-                $body = <<<EOL
-\$this->{$association->getName()}->removeElement(\$$singular);
-
-return \$this;
-EOL
-                ;
-
-                $method = $this->buildMethod(sprintf('remove%s', ucfirst($singular)));
-                $method->setBody($body);
-                $method->setReturnType($entity->getName());
-
-                $docBlock = $this->buildDocBlock(sprintf('Removes a %s.', $singular));
-                $docBlock->setTag($this->buildTagParam($singular, $association->getTargetEntity(), sprintf('The %s.', $singular)));
-                $docBlock->setTag($this->buildTagReturn(['self']));
-                $method->setDocBlock($docBlock);
-
-
-                $parameter = $this->buildParameter($singular, $association->getTargetEntity());
-                $method->setParameter($parameter);
-
+                $method = $this
+                    ->buildMethod()
+                    ->setName(sprintf('remove%s', ucfirst($singular)))
+                    ->setParameter($this
+                        ->buildParameter()
+                        ->setName($association->getName())
+                        ->setType($association->getTargetEntity())
+                    )
+                    ->setBody(sprintf(
+                        '$this->%s->removeElement($%s);'."\n\n".'return $this;',
+                        $association->getName(),
+                        $singular
+                    ))
+                    ->setReturnType($entity->getName())
+                    ->setDocBlock($this
+                        ->buildDocBlock()
+                        ->setShortDescription(sprintf('Removes a %s.', $singular))
+                        ->setTag($this
+                            ->buildTagParam()
+                            ->setVariableName($singular)
+                            ->setTypes($type)
+                            ->setDescription(sprintf('The %s.', $singular))
+                        )
+                        ->setTag($this
+                            ->buildTagReturn()
+                            ->setTypes('self')
+                        )
+                    );
 
                 $class->addMethodFromGenerator($method);
+
+
                 continue;
             }
 
             // Setter
-            $method = $this->buildMethod(sprintf('set%s', ucfirst($association->getName())));
-            $method->setBody(sprintf('$this->%s = $%s;'."\n\n".'return $this;', $association->getName(), $association->getName()));
-            $method->setReturnType($entity->getName());
-
-            $docBlock = $this->buildDocBlock(sprintf('Sets the %s.', $readableAssociationName));
-            $docBlock->setTag($this->buildTagParam($association->getName(), $type, sprintf('The %s.', $readableAssociationName)));
-            $docBlock->setTag($this->buildTagReturn(['self']));
-            $method->setDocBlock($docBlock);
-
-
-            $parameter = $this->buildParameter($association->getName(), $type);
-            $parameter->setDefaultValue(null);
-
-            $method->setParameter($parameter);
+            $method = $this
+                ->buildMethod()
+                ->setName(sprintf('set%s', ucfirst($association->getName())))
+                ->setParameter($this->buildAssociationParameter($association))
+                ->setBody(sprintf('$this->%1$s = $%1$s;'."\n\n".'return $this;', $association->getName()))
+                ->setReturnType($entity->getName())
+                ->setDocBlock($this
+                    ->buildDocBlock()
+                    ->setShortDescription(sprintf('Sets the %s.', $readableAssociationName))
+                    ->setTag($this
+                        ->buildTagParam()
+                        ->setVariableName($association->getName())
+                        ->setTypes(sprintf('null|%s', $type))
+                        ->setDescription(sprintf('The %s.', $readableAssociationName))
+                    )
+                    ->setTag($this
+                        ->buildTagReturn()
+                        ->setTypes('self')
+                    )
+                );
 
             $class->addMethodFromGenerator($method);
+
+
+
         }
 
-        file_put_contents($entity->getPath(), $this->generateCode($class));
+        $code = $this->generateCode($class);
+
+        // todo
+        // maybe clean the generated code (especially docblocks)
+        $replacements = [
+            '     * '.PHP_EOL                     => '     *'.PHP_EOL,
+            sprintf(' : \%s', $entity->getName()) => sprintf(' : %s', $entity->getShortName())
+        ];
+
+        $code = str_replace(
+            array_keys($replacements),
+            array_values($replacements),
+            $code
+        );
+
+        file_put_contents($entity->getPath(), $code);
     }
+
+
+
+
+
 
     /**
      * @param  string $name
@@ -544,5 +464,218 @@ EOL
         }
 
         return $this->inflector;
+    }
+
+    private function humanize($string)
+    {
+        return strtolower(preg_replace('~(?<=\\w)([A-Z])~', ' $1', $string));
+    }
+
+    private function generateConstructorBody(EntityInterface $entity)
+    {
+        $lines = [];
+
+        foreach ($entity->getAssociations() as $association) {
+            if (in_array($association->getType(), ['OneToMany', 'ManyToMany'])) {
+                $lines [] = sprintf('$this->%s = new \Doctrine\Common\Collections\ArrayCollection();', $association->getName());
+            }
+        }
+
+        return implode(PHP_EOL, $lines);
+    }
+
+    private function getEntityToString(EntityInterface $entity)
+    {
+        foreach ($this->toStringProperties as $propertyName) {
+            if ($entity->hasField($propertyName)) {
+                return sprintf('$this->%s', $propertyName);
+            }
+        }
+
+        return sprintf("'%s #'. \$this->id", $entity->getShortName());
+    }
+
+    private function generateToStringBody(EntityInterface $entity)
+    {
+        return sprintf('return (string) %s;', $this->getEntityToString($entity));
+    }
+
+    /**
+     * @param string $type
+     *
+     * @return string
+     */
+    protected function getTypeAlias($type)
+    {
+        if (isset($this->typeAlias[$type])) {
+            return $this->typeAlias[$type];
+        }
+
+        return $type;
+    }
+
+    private function buildFieldParameter(FieldInterface $field)
+    {
+        $parameter = $this
+            ->buildParameter()
+            ->setName($field->getName())
+            ->setType($this->getTypeAlias($field->getType()));
+
+        if ($field->isNullable()) {
+            $parameter->setDefaultValue(null);
+        }
+
+        return $parameter;
+    }
+    private function buildAssociationParameter(AssociationInterface $association)
+    {
+        $parameter = $this
+            ->buildParameter()
+            ->setName($association->getName())
+            ->setType($association->getTargetEntity())
+            ->setDefaultValue(null);
+
+        return $parameter;
+    }
+
+    private function generateFieldAnnotations(FieldInterface $field)
+    {
+        return implode(PHP_EOL, array_merge(
+            $this->generateValidationFieldAnnotations($field),
+            $this->generateDoctrineFieldAnnotations($field)
+        ));
+    }
+
+    private function generateAssociationAnnotations(AssociationInterface $association)
+    {
+        return implode(PHP_EOL, array_merge(
+            // todo
+            //$this->generateValidationAssociationAnnotations($association),
+            //[null],
+            $this->generateDoctrineAssociationAnnotations($association)
+        ));
+    }
+
+    private function generateDoctrineFieldAnnotations(FieldInterface $field)
+    {
+        $lines = [];
+
+        $column = [
+            'name'     => sprintf('"%s"', $field->getName()),
+            'type'     => sprintf('"%s"', $field->getType()),
+            'nullable' => var_export($field->isNullable(), true),
+            'unique'   => var_export($field->isUnique(), true),
+        ];
+
+        switch ($field->getType()) {
+            case Type::STRING:
+                $column['length'] = $field->getLength();
+                break;
+            case Type::DECIMAL:
+                $column['precision'] = $field->getPrecision();
+                $column['scale'] = $field->getScale();
+        }
+
+        // todo : implement Field::isUnsigned()
+        /*
+        if ($field->isUnsigned()) {
+            $column['options'] = '{"unsigned"=true}';
+        }
+        */
+        // todo : implement Field::getColumnDefinition()
+        /*
+        if (null !== $definition = $field->getColumnDefinition()) {
+            $column['columnDefinition'] = $definition;
+        }
+        */
+
+        $options = [];
+        foreach ($column as $option => $value) {
+            $options[] = sprintf('%s=%s', $option, $value);
+        }
+
+        $lines[] = sprintf('Column(%s)', implode(', ', $options));
+
+        if ($field instanceof PrimaryKeyInterface) {
+            $lines[] = 'Id';
+            $lines[] = 'GeneratedValue(strategy="AUTO")';
+        }
+
+        return array_map(function($line) {
+            return sprintf('@%s\%s', static::MAPPING_ALIAS, $line);
+        }, $lines);
+    }
+
+    private function generateDoctrineAssociationAnnotations(AssociationInterface $association)
+    {
+        $lines = [];
+
+        $options = [];
+        $options['targetEntity'] = $association->getTargetEntity();
+
+        if (null !== $mappedBy = $association->getMappedBy()) {
+            $options['mappedBy'] = $mappedBy;
+        }
+
+        if (null !== $inversedBy = $association->getInversedBy()) {
+            $options['inversedBy'] = $inversedBy;
+        }
+
+        $options = array_map(function($option, $value) {
+            return sprintf('%s="%s"', $option, $value);
+        }, array_keys($options), $options);
+
+        $lines[] = sprintf('%s(%s)', $association->getType(), implode(', ', $options));
+
+        return array_map(function($line) {
+            return sprintf('@%s\%s', static::MAPPING_ALIAS, $line);
+        }, $lines);
+    }
+
+    private function generateValidationFieldAnnotations(FieldInterface $field)
+    {
+        if ($field instanceof PrimaryKeyInterface) {
+            return [];
+        }
+
+        $annotations = '';
+
+        $annotations .= <<<EOL
+Type(
+    type="{$field->getType()}",
+    message="{$field->getTranslationKey()}.constraint.type"
+)
+EOL;
+
+        return [
+            sprintf('%s\%s', static::CONSTRAINT_ALIAS, $annotations),
+            null
+        ];
+    }
+
+    private function generateAddBody(AssociationInterface $association)
+    {
+        $singular = $this->singularize($association->getName());
+
+        $body = '';
+        if ($association->isBidirectional() && !$association->isOwningSide()) {
+            $methodName = 'OneToMany' === $association->getType()
+                ? sprintf('set%s', ucfirst($this->singularize($association->getMappedBy())))
+                : sprintf('add%s', ucfirst($this->singularize($association->getMappedBy())));
+
+            $body .= sprintf('$%s->%s($this);', $singular, $methodName);
+            $body .= "\n\n";
+        }
+
+        $body .= <<<PHP
+if (!\$this->{$association->getName()}->contains(\$$singular)) {
+    \$this->{$association->getName()}->add(\$$singular);
+}
+
+return \$this;
+PHP
+        ;
+
+        return $body;
     }
 }
